@@ -64,7 +64,7 @@ class SetupCaffeParameters(object):
 
         Args:
             caffe_parameters (:class:`caffe.Parameters`): the parameters of Caffe
-            inputs_info ('class':`cntk.contrib.crosstalkcaffe.unimodel.cntkmodel.CntkTensorDefinition`):
+            inputs_info (class:`cntk.contrib.crosstalkcaffe.unimodel.cntkmodel.CntkTensorDefinition`):
                 The input information of current layer
             cntk_layer_def ('class':`cntk.contrib.crosstalkcaffe.unimodel.cntkmodel.CntkLayersDefinition`):
                 The converted definition of CNTK layers
@@ -359,7 +359,7 @@ class CaffeAdapter(baseadapter.Adapter):
         Args:
             global_conf (:class:`~cntk.contrib.crosstalkcaffe.utils.globalconf.GlobalConf`):
                 The global configurations
-        
+
         Return:
             None
         '''
@@ -376,7 +376,7 @@ class CaffeAdapter(baseadapter.Adapter):
         self._raw_net = caffe_impl.net()
         self._caffe_pb2 = caffe_impl.caffepb
         with open(self._source_solver.model_path, 'r') as net_file:
-            text_format.Merge(net_file.read(), self._raw_net)        
+            text_format.Merge(net_file.read(), self._raw_net)
         self._uni_model.model_name = os.path.splitext(self._source_solver.model_path)[0]
 
         self._adapt_data_provider()
@@ -396,10 +396,10 @@ class CaffeAdapter(baseadapter.Adapter):
     def adapt_solver(self):
         '''
          Adapt Caffe solver into CNTK format
-        
+
         Args:
             None
-        
+
         Return:
             None
         '''
