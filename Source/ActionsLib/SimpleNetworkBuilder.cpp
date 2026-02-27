@@ -1775,6 +1775,7 @@ shared_ptr<ComputationNode<ElemType>> SimpleNetworkBuilder<ElemType>::AddTrainAn
     return output;
 }
 
+template class SimpleNetworkBuilder<half>;
 template class SimpleNetworkBuilder<float>;
 template class SimpleNetworkBuilder<double>;
 
@@ -1791,7 +1792,8 @@ TrainingCriterion ParseTrainingCriterionString(wstring s)
     // legacy/deprecated
     else if (EqualCI(s, L"classCrossEntropyWithSoftmax")) return TrainingCriterion::ClassCrossEntropyWithSoftmax;
     else if (EqualCI(s, L"sequenceWithSoftmax"))          return TrainingCriterion::SequenceWithSoftmax;
-    else LogicError("trainingCriterion: Invalid trainingCriterion value. Valid values are (crossEntropyWithSoftmax | squareError | logistic | classCrossEntropyWithSoftmax| sequenceWithSoftmax)");
+    else if (EqualCI(s, L"latticeSequenceWithSoftmax"))   return TrainingCriterion::LatticeSequenceWithSoftmax;
+    else LogicError("trainingCriterion: Invalid trainingCriterion value. Valid values are (crossEntropyWithSoftmax | squareError | logistic | classCrossEntropyWithSoftmax| sequenceWithSoftmax | sequenceWithLattice)");
 }
 
 EvalCriterion ParseEvalCriterionString(wstring s)

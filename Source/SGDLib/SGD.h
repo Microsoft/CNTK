@@ -20,11 +20,13 @@
 #include "Profiler.h"
 #include "MASGD.h"
 #include "ASGDHelper.h"
+#include <map>
 using namespace std; // ugh! TODO: get rid of this from .h files!!!
 
 #define CNTK_CHECKPOINT_VERSION_1 1     // 1 -> no version number 
 #define CNTK_CHECKPOINT_VERSION_2 2      
-#define CURRENT_CNTK_CHECKPOINT_VERSION CNTK_CHECKPOINT_VERSION_2
+#define CNTK_CHECKPOINT_VERSION_3 3     // float smoothed gradients for float16/half parameters
+#define CURRENT_CNTK_CHECKPOINT_VERSION CNTK_CHECKPOINT_VERSION_3
 
 namespace CNTK { namespace Internal {
     // Forward declarations.
@@ -33,6 +35,8 @@ namespace CNTK { namespace Internal {
 }}
 
 namespace Microsoft { namespace MSR { namespace CNTK {
+
+struct BestEpoch;
 
 enum class LearningRateSearchAlgorithm : int
 {
@@ -52,7 +56,8 @@ enum class GradientsUpdateType : int
     None,
     AdaGrad,
     RmsProp,
-    FSAdaGrad
+    FSAdaGrad,
+    Adam
 };
 
 // modelParallelSGD can be combined with dataParallelSGD/modelAveragingSGD/blockMomentumSGD 
@@ -88,6 +93,21 @@ struct RMSPropInfo
     }
 };
 
+struct AdamInfo
+{
+    double meanMomentum; //beta_1
+    double varMomentum;  //beta_2
+    double epsilon;
+
+    AdamInfo()
+    {
+        meanMomentum = 0.9;
+        varMomentum = 0.999;
+        epsilon = pow(10, -8);
+    }
+};
+
+
 struct GradientUpdateInfo
 {
     GradientsUpdateType type = GradientsUpdateType::AdaGrad;
@@ -96,6 +116,12 @@ struct GradientUpdateInfo
     // for FSAdaGrad:
     double targetAdagradAvDenom = 1;
     size_t varianceTimeConstant = 2 * 3600 * 100; // originally was: 2h of speech
+};
+
+struct BestEpoch
+{
+    double criterionMinValue = numeric_limits<double>::max();
+    int32_t epochIndex = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -185,7 +211,7 @@ protected:
     // Due to the GPU memory limitations, it is sometime not possible to hold the m_mbSize in RAM.
     // To mitigate this issue, we adopt the sub-minibatch implementation, where
     // each m_mbSize[epoch] is divided by a few sub-minibatch of which size will be no more than m_maxSamplesInRAM
-    // a forward-backward is performed for each sub-minibathch; a model update is performed after each minibatch
+    // a forward-backward is performed for each sub-minibatch; a model update is performed after each minibatch
     size_t m_numSubminiBatches;
     // alternative method to specify how to split minibatches into subminibatches
     // default is 1, which means no subminibatch is used
@@ -245,6 +271,7 @@ protected:
 
     GradientUpdateInfo m_gradType;
     RMSPropInfo m_rpi;
+    AdamInfo m_adam;
 
     size_t m_numMBsToShowResult = 0;
     size_t m_firstMBsToShowResult = 0;
@@ -318,6 +345,8 @@ protected:
     // true: disable Regularization
     // false: enable Regularization (default)
     bool m_disableRegInBatchNormalization;
+
+    bool m_useFP16AllReduce;
 };
 
 template <class ElemType>
@@ -344,6 +373,7 @@ public:
           // TODO: The next few do not belong into SGD any more than the network or reader we operate on. Either move network and reader in here, or move these out.
           m_modelPath((const wstring&) configSGD(L"modelPath")),
           m_keepCheckPointFiles(configSGD(L"keepCheckPointFiles", false)),
+          m_saveBestModelPerCriterion(configSGD(L"saveBestModelPerCriterion", false)),
           m_trainCriterionNodeName((const wstring&) configSGD(L"trainCriterionNodeName", L"")),
           m_evalCriterionNodeName ((const wstring&) configSGD(L"evalCriterionNodeName", L"")),
           m_traceNodeNamesReal    (configSGD(L"traceNodeNamesReal",     ConfigRecordType::Array(stringargvector()))),
@@ -413,7 +443,7 @@ protected:
                                   const std::vector<ComputationNodeBasePtr>& evaluationNodes,
                                   StreamMinibatchInputs* inputMatrices,
                                   const std::list<ComputationNodeBasePtr>& learnableNodes,
-                                  std::list<Matrix<ElemType>>& smoothedGradients, std::vector<double> smoothedCounts,
+                                  std::list<MatrixBasePtr>& smoothedGradients, std::vector<double> smoothedCounts,
                                   const bool learnRateInitialized,
                                   const double largestPrevLearnRatePerSample);
 
@@ -429,7 +459,7 @@ protected:
                                          const std::vector<ComputationNodeBasePtr>& evaluationNodes,
                                          StreamMinibatchInputs* inputMatrices,
                                          const std::list<ComputationNodeBasePtr>& learnableNodes,
-                                         std::list<Matrix<ElemType>>& smoothedGradients, std::vector<double> smoothedCounts,
+                                         std::list<MatrixBasePtr>& smoothedGradients, std::vector<double> smoothedCounts,
                                          /*out*/ EpochCriterion& epochCriterion,
                                          /*out*/ std::vector<EpochCriterion>& epochEvalErrors,
                                          std::string prefixMsg,
@@ -449,7 +479,7 @@ protected:
                                    const std::vector<ComputationNodeBasePtr>& evaluationNodes,
                                    StreamMinibatchInputs* inputMatrices,
                                    const std::list<ComputationNodeBasePtr>& learnableNodes,
-                                   std::list<Matrix<ElemType>>& smoothedGradients, std::vector<double> smoothedCounts,
+                                   std::list<MatrixBasePtr>& smoothedGradients, std::vector<double> smoothedCounts,
                                    const double learningRateAdjustmentFactor);
 
     // uses a small percentage of training data of minibatch to
@@ -467,10 +497,10 @@ protected:
                                       const std::vector<ComputationNodeBasePtr>& evaluationNodes,
                                       StreamMinibatchInputs* inputMatrices,
                                       const std::list<ComputationNodeBasePtr>& learnableNodes,
-                                      std::list<Matrix<ElemType>>& smoothedGradients, std::vector<double> smoothedCounts,
+                                      std::list<MatrixBasePtr>& smoothedGradients, std::vector<double> smoothedCounts,
                                       const size_t minMinibatchSize, const size_t maxMinibatchSize);
 
-    // Attemps to compute the error signal for the whole utterance, which will
+    // Attempts to compute the error signal for the whole utterance, which will
     // be fed to the neural network as features. Currently it is a workaround
     // for the two-forward-pass sequence and ctc training, which allows
     // processing more utterances at the same time. Only used in Kaldi2Reader.
@@ -494,36 +524,48 @@ protected:
                          const std::vector<ComputationNodeBasePtr>& evaluationNodes,
                          StreamMinibatchInputs* inputMatrices,
                          const std::list<ComputationNodeBasePtr>& learnableNodes,
-                         std::list<Matrix<ElemType>>& smoothedGradients, std::vector<double>& smoothedCounts,
+                         std::list<MatrixBasePtr>& smoothedGradients, std::vector<double>& smoothedCounts,
                          /*out*/ EpochCriterion& epochCriterion,
                          /*out*/ std::vector<EpochCriterion>& epochEvalErrors,
                          const std::string& prefixMsg = "",
                          const size_t maxNumberOfSamples = SIZE_MAX,
                          const size_t totalMBsSeenBefore = 0,
-                         ::CNTK::Internal::TensorBoardFileWriterPtr tensorBoardWriter = nullptr);
+                         ::CNTK::Internal::TensorBoardFileWriterPtr tensorBoardWriter = nullptr,
+                         const int startEpoch = 0);
 
     void InitDistGradAgg(int numEvalNodes, int numGradientBits, int deviceId, int traceLevel);
     void InitModelAggregationHandler(int traceLevel, DEVICEID_TYPE devID);
-public:
+private:
     // UpdateWeights() - actual weight update, implementing various update rules
     void UpdateWeights(Matrix<ElemType>& functionValues, Matrix<ElemType>& gradientValues,
-                       Matrix<ElemType>& smoothedGradient, double& smoothedCount,
+        MatrixBasePtr& smoothedGradient, double& smoothedCount,
+        const double learnRatePerSample, const double momentumPerSample,
+        size_t actualMBSize,
+        const double L2RegWeight, const double L1RegWeight,
+        const bool needAveMultiplier,
+        const bool useNesterovMomentum) const;
+
+    template<class ElemType2 = ElemType>
+    void TypedUpdateWeights(Matrix<ElemType2>& functionValues, Matrix<ElemType2>& gradientValues,
+                       Matrix<ElemType2>& smoothedGradient, double& smoothedCount,
                        const double learnRatePerSample, const double momentumPerSample,
                        size_t actualMBSize,
                        const double L2RegWeight, const double L1RegWeight,
                        const bool needAveMultiplier,
                        const bool useNesterovMomentum) const;
+public:
     // return -1 if nothing exists
     int DetermineStartEpoch(const bool makeMode);
 
-    wstring GetModelNameForEpoch(const int epoch, bool bLastModel = false);
+    wstring GetModelNameForEpoch(const int epoch, bool bLastModel = false) const;
 
 protected:
-    void ClipGradient(Matrix<ElemType>& gradient, const size_t actualMBSize) const;
+    template<class ElemType2 = ElemType>
+    void ClipGradient(Matrix<ElemType2>& gradient, const size_t actualMBSize) const;
 
     void SaveCheckPointInfo(const size_t epoch, const size_t totalSamplesSeen, // TODO: combine totalSamplesSeen and prevCriterion into a EpochCriterion type
                             const double learnRatePerSample,
-                            const std::list<Matrix<ElemType>>& smoothedGradients,
+                            const std::list<MatrixBasePtr>& smoothedGradients,
                             const std::vector<double>& smoothedCounts,
                             const double prevCriterion,
                             const size_t minibatchSize);
@@ -531,14 +573,14 @@ protected:
     bool TryLoadCheckPointInfo(const size_t epochNumber,
                                /*out*/ size_t& totalSamplesSeen,
                                /*out*/ double& learnRatePerSample,
-                               std::list<Matrix<ElemType>>& smoothedGradients,
+                               std::list<MatrixBasePtr>& smoothedGradients,
                                std::vector<double>& smoothedCounts,
                                /*out*/ double& prevCriterion,
                                /*out*/ size_t& minibatchSize);
     void LoadCheckPointInfo(const size_t epochNumber,
                             /*out*/ size_t& totalSamplesSeen,
                             /*out*/ double& learnRatePerSample,
-                            std::list<Matrix<ElemType>>& smoothedGradients,
+                            std::list<MatrixBasePtr>& smoothedGradients,
                             std::vector<double>& smoothedCounts,
                             /*out*/ double& prevCriterion,
                             /*out*/ size_t& minibatchSize);
@@ -565,6 +607,9 @@ public:
 protected:
     std::wstring m_modelPath;
     bool m_keepCheckPointFiles;
+    bool m_saveBestModelPerCriterion;
+    // Mapping from criterion to the best epoch on validation data set.
+    std::map<std::wstring, BestEpoch> m_criteriaBestEpoch;
 
     std::wstring m_trainCriterionNodeName;
     std::wstring m_evalCriterionNodeName;

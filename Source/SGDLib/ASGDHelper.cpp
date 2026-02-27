@@ -87,7 +87,7 @@ public:
         size_t nodeNumRanks,                                                            // Number of working nodes
         bool useAsyncBuffer = true,                                                   // Using asynchonous buffer to hide communication cost
         bool isSimulatedModelAveragingSGD = false,                                      // Using parameter server-based MA rather than ASGD
-        AdjustLearningRateAtBeginning adjusttype = AdjustLearningRateAtBeginning::None, // Adjust learning per minibatches at very begining of training process
+        AdjustLearningRateAtBeginning adjusttype = AdjustLearningRateAtBeginning::None, // Adjust learning per minibatches at very beginning of training process
         // this could be used to tackle the unstableness of ASGD
         double adjustCoef = 0.2,                                                        // see in DecayCoefficient()
         size_t adjustPerMinibatches = 600,                                              //
@@ -644,6 +644,20 @@ ASGDHelper<ElemType>* NewASGDHelper(
     return new NoneASGDHelper<ElemType>(learnableNodes, nodeNumRanks, useAsyncBuffer, isSimulatedModelAveragingSGD, 
                                       adjusttype, adjustCoef, adjustPerMinibatches, traceLevel, syncPerfStats); 
 #endif
+}
+
+template<> ASGDHelper<half>* NewASGDHelper<half>(
+    const std::list<ComputationNodeBasePtr> & learnableNodes,
+    size_t nodeNumRanks,
+    bool useAsyncBuffer,
+    bool isSimulatedModelAveragingSGD,
+    AdjustLearningRateAtBeginning adjusttype,
+    double adjustCoef,
+    size_t adjustPerMinibatches,
+    int traceLevel,
+    int syncPerfStats)
+{
+    RuntimeError("NewASGDHelper - half not supported!");
 }
 
 template ASGDHelper<float>* NewASGDHelper<float>(

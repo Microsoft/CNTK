@@ -26,6 +26,7 @@
 #include "CommonMatrix.h"
 #include "SGD.h"
 #include "MPIWrapper.h"
+#include "EnvironmentUtil.h"
 #include "Config.h"
 #include "SimpleEvaluator.h"
 #include "SimpleOutputWriter.h"
@@ -84,25 +85,18 @@ void SetupProfiling(ProfilerContext& profilerContext, const ConfigParamType& con
     }
 }
 
-void RedirectStdErr(wstring logpath)
+void RedirectStdErr(wstring logpath, bool appendLogFile = false)
 {
     // TODO: if there is already a file, rename it
     LOGPRINTF(stderr, "Redirecting stderr to file %S\n", logpath.c_str());
-    auto f = make_shared<File>(logpath.c_str(), fileOptionsWrite | fileOptionsText);
+    auto fileOption = appendLogFile ? fileOptionsAppend : fileOptionsWrite;
+    auto f = make_shared<File>(logpath.c_str(), fileOption | fileOptionsText);
     if (dup2(fileno(*f), 2) == -1)
     {
         RuntimeError("unexpected failure to redirect stderr to log file");
     }
     setvbuf(stderr, NULL, _IONBF, 16384); // unbuffer it
     static auto fKept = f;                // keep it around (until it gets changed)
-}
-
-std::string WCharToString(const wchar_t* wst)
-{
-    std::wstring ws(wst);
-    std::string s(ws.begin(), ws.end());
-    s.assign(ws.begin(), ws.end());
-    return s;
 }
 
 size_t GetMaxEpochs(const ConfigParameters& configParams)
@@ -176,6 +170,91 @@ static void DisableLegacyUsage(const ConfigParameters& TopLevelConfig, const Con
 // When running in parallel with MPI, only commands in 'commandstoRunOnAllRanks' should
 // be run in parallel across multiple ranks. Others should only run on rank 0
 const std::set<std::string> commandstoRunOnAllRanks = { "train", "trainRNN", "adapt", "test", "eval", "cv", "devtest", "bnstat" };
+
+
+template <typename ElemType>
+bool DispatchThisAction(const string &thisAction, const ConfigParameters &commandParams, const ConfigParameters& config)
+{
+    if (thisAction == "train" || thisAction == "trainRNN")
+    {
+        DoTrain<ConfigParameters, ElemType>(commandParams);
+    }
+    else if (thisAction == "bnstat")
+    {
+        DoBatchNormalizationStat<ElemType>(commandParams);
+    }
+    else if (thisAction == "adapt")
+    {
+        DoAdapt<ElemType>(commandParams);
+    }
+    else if (thisAction == "test" || thisAction == "eval")
+    {
+        DoEval<ElemType>(commandParams);
+    }
+    else if (thisAction == "edit")
+    {
+        DoEdit<ElemType>(commandParams);
+    }
+    else if (thisAction == "cv")
+    {
+        DoCrossValidate<ElemType>(commandParams);
+    }
+    else if (thisAction == "write")
+    {
+        DoWriteOutput<ElemType>(commandParams);
+    }
+    else if (thisAction == "devtest")
+    {
+        TestCn<ElemType>(config); // for "devtest" action pass the root config instead
+    }
+    else if (thisAction == "dumpNodes" /*deprecated:*/ || thisAction == "dumpNode" || thisAction == "dumpnode")
+    {
+        DoDumpNodes<ElemType>(commandParams);
+    }
+    else if (thisAction == "convertdbn")
+    {
+        DoConvertFromDbn<ElemType>(commandParams);
+    }
+    else if (thisAction == "exportdbn")
+    {
+        DoExportToDbn<ElemType>(commandParams);
+    }
+    else if (thisAction == "createLabelMap")
+    {
+        DoCreateLabelMap<ElemType>(commandParams);
+    }
+    else if (thisAction == "writeWordAndClass")
+    {
+        DoWriteWordAndClassInfo<ElemType>(commandParams);
+    }
+    else if (thisAction == "plot")
+    {
+        DoTopologyPlot<ElemType>(commandParams);
+    }
+    else if (thisAction == "SVD")
+    {
+        DoParameterSVD<ElemType>(commandParams);
+    }
+    else
+    {
+        return false;
+    }
+    return true;
+}
+
+template <>
+bool DispatchThisAction<half>(const string &thisAction, const ConfigParameters &commandParams, const ConfigParameters& )
+{
+    if (thisAction == "train" || thisAction == "trainRNN")
+    {
+        DoTrain<ConfigParameters, half>(commandParams);
+    }
+    else
+    {
+        RuntimeError("half only supported for action train or trainRNN!");
+    }
+    return true;
+}
 
 // process the command
 template <typename ElemType>
@@ -276,72 +355,20 @@ void DoCommands(const ConfigParameters& config, const shared_ptr<MPIWrapper>& mp
                     {
                         LOGPRINTF(stderr, "CNTKCommandTrainBegin: %s\n", command[i].c_str());
                     }
-                    DoTrain<ConfigParameters, ElemType>(commandParams);
+                }
+
+                if (!DispatchThisAction<ElemType>(thisAction, commandParams, config))
+                {
+                    RuntimeError("unknown action: %s  in command set: %s", thisAction.c_str(), command[i].c_str());
+                }
+
+                if (thisAction == "train" || thisAction == "trainRNN")
+                {
                     if (progressTracing)
                     {
                         LOGPRINTF(stderr, "CNTKCommandTrainEnd: %s\n", command[i].c_str());
                     }
                     fullEpochsOffset += GetMaxEpochs(commandParams);
-                }
-                else if (thisAction == "bnstat")
-                {
-                    DoBatchNormalizationStat<ElemType>(commandParams);
-                }
-                else if (thisAction == "adapt")
-                {
-                    DoAdapt<ElemType>(commandParams);
-                }
-                else if (thisAction == "test" || thisAction == "eval")
-                {
-                    DoEval<ElemType>(commandParams);
-                }
-                else if (thisAction == "edit")
-                {
-                    DoEdit<ElemType>(commandParams);
-                }
-                else if (thisAction == "cv")
-                {
-                    DoCrossValidate<ElemType>(commandParams);
-                }
-                else if (thisAction == "write")
-                {
-                    DoWriteOutput<ElemType>(commandParams);
-                }
-                else if (thisAction == "devtest")
-                {
-                    TestCn<ElemType>(config); // for "devtest" action pass the root config instead
-                }
-                else if (thisAction == "dumpNodes" /*deprecated:*/ || thisAction == "dumpNode" || thisAction == "dumpnode")
-                {
-                    DoDumpNodes<ElemType>(commandParams);
-                }
-                else if (thisAction == "convertdbn")
-                {
-                    DoConvertFromDbn<ElemType>(commandParams);
-                }
-                else if (thisAction == "exportdbn")
-                {
-                    DoExportToDbn<ElemType>(commandParams);
-                }
-                else if (thisAction == "createLabelMap")
-                {
-                    DoCreateLabelMap<ElemType>(commandParams);
-                }
-                else if (thisAction == "writeWordAndClass")
-                {
-                    DoWriteWordAndClassInfo<ElemType>(commandParams);
-                }
-                else if (thisAction == "plot")
-                {
-                    DoTopologyPlot<ElemType>(commandParams);
-                }
-                else if (thisAction == "SVD")
-                {
-                    DoParameterSVD<ElemType>(commandParams);
-                }
-                else
-                {
-                    RuntimeError("unknown action: %s  in command set: %s", thisAction.c_str(), command[i].c_str());
                 }
             }
 
@@ -377,30 +404,6 @@ void PrintUsageInfo()
     LOGPRINTF(stderr, "For detailed information please consult the CNTK book\n");
     LOGPRINTF(stderr, "\"An Introduction to Computational Networks and the Computational Network Toolkit\"\n");
     LOGPRINTF(stderr, "-------------------------------------------------------------------\n");
-}
-
-// print gpu info for current gpu devices (e.g. Device[0]: cores = 2496; computeCapability = 5.2; type = "Quadro M4000"; total memory = 8192 MB; free memory = 8192 MB)
-void PrintGpuInfo()
-{
-#ifndef CPUONLY
-    std::vector<GpuData> gpusData = GetAllGpusData();
-
-    if (gpusData.empty())
-    {
-        LOGPRINTF(stderr, "No GPUs found\n");
-        return;
-    }
-
-    LOGPRINTF(stderr, "-------------------------------------------------------------------\n");
-    LOGPRINTF(stderr, "GPU info:\n\n");
-
-    for (GpuData& data : gpusData)
-    {
-        LOGPRINTF(stderr, "\t\tDevice[%d]: cores = %d; computeCapability = %d.%d; type = \"%s\"; total memory = %lu MB; free memory = %lu MB\n",
-                  data.deviceId, data.cudaCores, data.versionMajor, data.versionMinor, data.name.c_str(), (unsigned long)data.totalMemory, (unsigned long)data.freeMemory);
-    }
-    LOGPRINTF(stderr, "-------------------------------------------------------------------\n");
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +444,7 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
 
     // startup message
     // In case of a redirect of stderr, this will be printed twice, once upfront, and once again after the redirect so that it goes into the log file
-    wstring startupMessage = msra::strfun::wstrprintf(L"running on %ls at %ls\n", msra::strfun::utf16(GetHostName()).c_str(), msra::strfun::utf16(TimeDateStamp()).c_str());
+    wstring startupMessage = msra::strfun::wstrprintf(L"running on %ls at %ls\n", Microsoft::MSR::CNTK::ToFixedWStringFromMultiByte(GetHostName()).c_str(), Microsoft::MSR::CNTK::ToFixedWStringFromMultiByte(TimeDateStamp()).c_str());
     startupMessage += msra::strfun::wstrprintf(L"command line: %ls", exePath.c_str());
     for (const auto& arg : args)
         startupMessage += L"  " + arg;
@@ -525,7 +528,7 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
     auto ensureMPIWrapperCleanup = MakeScopeExit(&MPIWrapper::DeleteInstance);
     // when running under MPI with more than one node, use 'true' as the default value for parallelTrain,
     // 'false' otherwise.
-    bool paralleltrain = config(L"parallelTrain", (MPIWrapper::GetTotalNumberOfMPINodes() > 1));
+    bool paralleltrain = config(L"parallelTrain", (EnvironmentUtil::GetTotalNumberOfMPINodes() > 1));
 
     if (paralleltrain)
     {
@@ -544,13 +547,15 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
         if (paralleltrain && mpi->CurrentNodeRank() != 0)
             logpath += msra::strfun::wstrprintf(L".rank%d", (int) mpi->CurrentNodeRank());
 
-        RedirectStdErr(logpath);
+        RedirectStdErr(logpath, config(L"appendLogFile", false));
         LOGPRINTF(stderr, "%ls\n", startupMessage.c_str());
-        ::CNTK::PrintBuiltInfo();
+        ::CNTK::Internal::PrintBuiltInfo();
     }
 
     // echo gpu info to log
-    PrintGpuInfo();
+#ifndef CPUONLY
+    ::CNTK::Internal::PrintGpuInfo(GetAllGpusData());
+#endif
 
     // Setup profiling
     ProfilerContext profilerContext;
@@ -605,6 +610,9 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
     LOGPRINTF(stderr, "__COMPLETED__\n");
     fflush(stderr);
 
+    // In case of success, finalizing the mpi if necessary.
+    if (mpi)
+        mpi->Finalize();
     return EXIT_SUCCESS;
 }
 
@@ -614,12 +622,16 @@ int wmainWithBS(int argc, wchar_t* argv[]) // called from wmain which is a wrapp
 
 static void PrintBanner(int argc, wchar_t* argv[], const string& timestamp)
 {
-    fprintf(stderr, "CNTK 2.0.beta15.0+ (");
+#ifndef CNTK_VERSION_BANNER
+#error CNTK_VERSION_BANNER must be set
+#endif
+#define MACRO_TO_STRING(s) #s
+    fprintf(stderr, "CNTK %s (", MACRO_TO_STRING(CNTK_VERSION_BANNER));
 #ifdef _GIT_EXIST
     fprintf(stderr, "%s %.6s, ", _BUILDBRANCH_, _BUILDSHA1_);
 #endif
     fprintf(stderr, "%s %s", __DATE__, __TIME__); // build time
-    fprintf(stderr, ") on %s at %s\n\n", GetHostName().c_str(), timestamp.c_str());
+    fprintf(stderr, ") at %s\n\n", timestamp.c_str());
     for (int i = 0; i < argc; i++)
         fprintf(stderr, "%*s%ls", i > 0 ? 2 : 0, "", argv[i]); // use 2 spaces for better visual separability
     fprintf(stderr, "\n");
@@ -668,7 +680,7 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[])
     
     // when running under MPI with more than one node, use 'true' as the default value for parallelTrain,
     // 'false' otherwise.
-    bool paralleltrain = config(L"parallelTrain", (MPIWrapper::GetTotalNumberOfMPINodes() > 1));
+    bool paralleltrain = config(L"parallelTrain", (EnvironmentUtil::GetTotalNumberOfMPINodes() > 1));
 
     if (paralleltrain)
     {
@@ -705,14 +717,16 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[])
         // for MPI workers except main, append .rankN
         if (paralleltrain && mpi->CurrentNodeRank() != 0)
             logpath += msra::strfun::wstrprintf(L".rank%d", mpi->CurrentNodeRank());
-        RedirectStdErr(logpath);
+        RedirectStdErr(logpath, config(L"appendLogFile", false));
         if (traceLevel == 0)
             PrintBanner(argc, argv, timestamp); // repeat simple banner into log file
     }
 
     // full config info
-    ::CNTK::PrintBuiltInfo();
-    PrintGpuInfo();
+    ::CNTK::Internal::PrintBuiltInfo();
+#ifndef CPUONLY
+    ::CNTK::Internal::PrintGpuInfo(GetAllGpusData());
+#endif
 
 #ifdef _DEBUG
     if (traceLevel > 0)
@@ -759,12 +773,14 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[])
         LOGPRINTF(stderr, "precision = \"%s\"\n", type.c_str());
     }
 
-    if (type == "float")
+    if (type == "float16")
+        DoCommands<half>(config, mpi);
+    else if (type == "float")
         DoCommands<float>(config, mpi);
     else if (type == "double")
         DoCommands<double>(config, mpi);
     else
-        RuntimeError("CNTK: Invalid precision string: \"%s\", must be \"float\" or \"double\"", type.c_str());
+        RuntimeError("CNTK: Invalid precision string: \"%s\", must be \"float16\" or \"float\" or \"double\"", type.c_str());
 
     // if completed then write a doneFile if requested
     if (!doneFile.empty())
@@ -781,6 +797,8 @@ int wmainOldCNTKConfig(int argc, wchar_t* argv[])
         fprintf(stderr, "COMPLETED.\n");
     fflush(stderr);
 
+    if (mpi)
+        mpi->Finalize();
     return EXIT_SUCCESS;
 }
 
@@ -804,7 +822,7 @@ int wmain1(int argc, wchar_t* argv[]) // called from wmain which is a wrapper th
     {        
         if (argc <= 1)
         {
-            ::CNTK::PrintBuiltInfo(); // print build info directly in case that user provides zero argument (convenient for checking build type)
+            ::CNTK::Internal::PrintBuiltInfo(); // print build info directly in case that user provides zero argument (convenient for checking build type)
             LOGPRINTF(stderr, "No command-line argument given.\n");
             PrintUsageInfo();
             fflush(stderr);

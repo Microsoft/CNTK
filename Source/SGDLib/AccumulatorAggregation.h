@@ -18,6 +18,7 @@
 #include "Matrix.h"
 #include "SimpleDistGradAggregator.h"
 #include "V2SimpleDistGradAggregator.h"
+#include "SimpleDistGradAggregatorHelper.h"
 
 namespace Microsoft { namespace MSR { namespace CNTK {
 
@@ -46,21 +47,12 @@ void AggregateAccumulatorValuesAndUpdateEvaluation(
     }
 
     // Prepare aggregator.
-    std::shared_ptr<IDistGradAggregator<ElemType>> distGradAgg;
-    if (Globals::UseV2Aggregator())
-        distGradAgg = make_shared<V2SimpleDistGradAggregator<ElemType>>(
-            mpi,
-            false /*useAsyncAggregation*/,
-            net->GetDeviceId(),
-            0 /*syncStatsTrace*/,
-            ::CNTK::MPICommunicator(packThresholdSizeInBytes));
-    else
-        distGradAgg = make_shared<SimpleDistGradAggregator<ElemType>>(
-            mpi,
-            false /*useAsyncAggregation*/,
-            net->GetDeviceId(),
-            0 /*syncStatsTrace*/,
-            packThresholdSizeInBytes);
+    std::shared_ptr<IDistGradAggregator<ElemType>> distGradAgg = GetSimpleDistGradAggregator<ElemType>(
+        mpi,
+        false /*useAsyncAggregation*/,
+        net->GetDeviceId(),
+        0 /*syncStatsTrace*/,
+        packThresholdSizeInBytes);
 
     // Prepare header.
     const size_t c_evalNodes = 1;
@@ -96,14 +88,14 @@ void AggregateAccumulatorValuesAndUpdateEvaluation(
     }
 
     // Update output values of nodes between accumulator nodes and evaluation nodes.
-    net->ForwardProp(evalNodesWhichAccumulateResult);
+    net->ForwardPropFromTo(allEpochAccumulatorNodes, evalNodesWhichAccumulateResult);
 }
 
 template <typename ElemType>
 void UpdateEpochEvaluationForAccumulatedResult(
     std::vector<EpochCriterion>& epochEvalErrors,
     const std::vector<ComputationNodeBasePtr>& evaluationNodes,
-    CriterionAccumulator<ElemType> localEpochEvalErrors,
+    CriterionAccumulatorBase& localEpochEvalErrors,
     std::function<bool(ComputationNodeBasePtr)> containsAccumulatedResult
     )
 {
@@ -128,14 +120,14 @@ void AggregateAccumulatorValuesAndUpdateEpochEvaluation(
     std::shared_ptr<MPIWrapper> mpi,
     std::vector<EpochCriterion>& epochEvalErrors,
     const std::vector<ComputationNodeBasePtr>& evaluationNodes,
-    CriterionAccumulator<ElemType> localEpochEvalErrors,
+    CriterionAccumulatorBase& localEpochEvalErrors,
     std::function<bool(ComputationNodeBasePtr)> containsAccumulatedResult,
     size_t packThresholdSizeInBytes = DEFAULT_PACK_THRESHOLD_SIZE_IN_BYTES)
 {
     // Each node contains accumulated values for part of the data set, we have to aggregate accumulated values.
     AggregateAccumulatorValuesAndUpdateEvaluation<ElemType>(net, evalNodesWhichAccumulateResult, gradHeader, mpi, packThresholdSizeInBytes);
 
-    // After values of accumulators have been aggregated accross nodes, we have to update evaluation results for
+    // After values of accumulators have been aggregated across nodes, we have to update evaluation results for
     // evaluation nodes that accumulate results.
     UpdateEpochEvaluationForAccumulatedResult<ElemType>(epochEvalErrors, evaluationNodes, localEpochEvalErrors,
                                                         containsAccumulatedResult);

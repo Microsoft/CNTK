@@ -7,6 +7,8 @@
 
 #include "CNTKLibrary.h"
 #include "Constants.h"
+#include "NcclComm.h"
+#include "MPIWrapper.h"
 #include <MatrixQuantizerImpl.h>
 
 namespace Microsoft { namespace MSR { namespace CNTK {
@@ -21,7 +23,7 @@ namespace CNTK
     class MPICommunicatorImpl : public DistributedCommunicator, public std::enable_shared_from_this<MPICommunicatorImpl>
     {
     public:
-        MPICommunicatorImpl(size_t packThresholdSizeInBytes = DEFAULT_PACK_THRESHOLD_SIZE_IN_BYTES);
+        MPICommunicatorImpl(size_t packThresholdSizeInBytes = DEFAULT_PACK_THRESHOLD_SIZE_IN_BYTES, bool useFP16AllReduce = false);
 
         virtual const std::unordered_set<DistributedWorkerDescriptor>& Workers() const override;
 
@@ -50,6 +52,9 @@ namespace CNTK
         virtual void AggregateInPlace(
             const std::vector<NDArrayViewPtr>& values,
             const std::unordered_set<DistributedWorkerDescriptor>& sendToWorkers) override;
+
+        virtual void AllReduceSparseBlockColumn(
+            std::vector<NDArrayViewPtr>& sbcValues) override;
 
         virtual void Aggregate(
             const std::vector<NDArrayViewPtr>& inValues,
@@ -87,13 +92,22 @@ namespace CNTK
         size_t m_packThresholdSizeInBytes;
         std::unique_ptr<Microsoft::MSR::CNTK::Matrix<float>> m_aggregationBufferFloat;
         std::unique_ptr<Microsoft::MSR::CNTK::Matrix<double>> m_aggregationBufferDouble;
+        std::vector<std::shared_ptr<Microsoft::MSR::CNTK::Matrix<half>>> m_intermediateGPUBuffers;
+        bool m_useFP16AllReduce;
 
+        // NcclComm
+        std::unique_ptr<Microsoft::MSR::CNTK::NcclComm> m_nccl;
+
+        std::vector<Buffer> m_intermediateSBCIndexCPUBuffers;
+        std::vector<Buffer> m_intermediateSBCValueCPUBuffers;
     protected:
         DeviceDescriptor GetNonCPUDevice(const std::vector<NDArrayViewPtr>& values)
         {
             auto device = std::find_if(values.begin(), values.end(), [](const NDArrayViewPtr v) { return v->Device().Type() != DeviceKind::CPU; });
             return values.end() == device ? DeviceDescriptor::CPUDevice() : (*device)->Device();
         }
+
+        bool ShouldUseFP16AllReduce(const NDArrayViewPtr& viewPtr);
 
         size_t GetBufferSize(const NDArrayViewPtr& viewPtr)
         {
@@ -116,16 +130,24 @@ namespace CNTK
 
         Microsoft::MSR::CNTK::MPIWrapperPtr m_mpi;
 
+        bool ShouldCopyDataToCPU(NDArrayViewPtr inputValue);
+        void CopyDataFromGPUToCPU(std::vector<NDArrayViewPtr>& inputValues);
+
         template <typename ElemType>
-        std::unique_ptr<Microsoft::MSR::CNTK::Matrix<ElemType>> setContinousBuffer(std::vector<size_t>& packedGradientsIndex, size_t packedGradientsSizeInBytes,
+        std::unique_ptr<Microsoft::MSR::CNTK::Matrix<ElemType>> SetContinuousBuffer(std::vector<size_t>& packedGradientsIndex, size_t packedGradientsSizeInBytes,
             const std::vector<NDArrayViewPtr>& inputValues, const std::vector<NDArrayViewPtr>& outputValues,
             std::vector<NDArrayViewPtr>& valuesToAggregate, std::vector<NDArrayViewPtr>& valuesAfterAggregate);
 
         template <typename ElemType>
-        void packToContinousBuffer(Microsoft::MSR::CNTK::Matrix<ElemType>* aggregationBuffer, std::vector<size_t>& packedGradientsIndex,
+        void PackToContinuousBuffer(Microsoft::MSR::CNTK::Matrix<ElemType>* aggregationBuffer, std::vector<size_t>& packedGradientsIndex,
             const std::vector<NDArrayViewPtr>& inputValues, const std::vector<NDArrayViewPtr>& outputValues, std::vector<NDArrayViewPtr>& valuesToAggregate, std::vector<NDArrayViewPtr>& valuesAfterAggregate);
 
         template <typename ElemType>
-        void unpackFromContinousBuffer(Microsoft::MSR::CNTK::Matrix<ElemType>* aggregationBuffer, const std::vector<NDArrayViewPtr>& outputValues, std::vector<size_t>& packedGradientsIndex);
+        void UnpackFromContinuousBuffer(Microsoft::MSR::CNTK::Matrix<ElemType>* aggregationBuffer, const std::vector<NDArrayViewPtr>& outputValues, std::vector<size_t>& packedGradientsIndex);
+
+        template <typename ElemType>
+        void AllReduceData(ElemType* inputData, ElemType* outputData, size_t numElements, std::vector<MPI_Request>* pAllReduceRequests, bool dataOnCPU, MPI_Op op = MPI_SUM, bool forceSync = false);
+
+        void AllReduceDataHalf(half* inputData, half* outputData, size_t numElements, std::vector<MPI_Request>* pAllReduceRequests, bool dataOnCPU, MPI_Op op = MPI_SUM, bool forceSync = false);
     };
 }
